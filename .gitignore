@@ -53,3 +53,20 @@ gameplay-selfheal*.json
 Thumbs.db
 __pycache__/
 *.pyc
+
+# Legacy of Goku II - limpieza para GitHub
+.europe-codegen-backups/
+*.pre-*
+*.bak-*
+android/.gradle/
+android/.cxx/
+android/app/.cxx/
+android/**/build/
+
+# Conservar los graficos originales de la interfaz
+!android/app/src/main/assets/**/*.png
+!android/app/src/main/res/**/*.png
+!docs/**/*.png
+
+generated_europe/
+*.apk

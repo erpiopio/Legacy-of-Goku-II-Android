@@ -1,0 +1,27 @@
+--- /tmp/legacy2-doors-before.cpp	2026-11-16 08:45:42.961379313 +0100
++++ src/legacy2_extended_view_europe.cpp	2026-11-16 09:22:21.685560116 +0100
+@@ -688,7 +688,7 @@
+     const bool health_slot =
+         (oam_index >= 0 && oam_index <= 2) ||
+         (oam_index >= 8 && oam_index <= 10);
+-    const bool health = health_slot && x < 96 && y < 32;
++    const bool health = false; // PRUEBA TEMPORAL: saltos de NPC
+     const bool area_name = y >= 112 && y <= 160 &&
+         tile >= 0x308u && tile <= 0x378u;
+     // These tile identities are verified only for non-affine field HUD.
+@@ -1012,8 +1012,13 @@
+     // Widen only these rectangle reads. Other users of the same rectangle
+     // remove/update objects or control lifetimes and must retain native data.
+     // In particular, 0300109C is an ALFP vtable global, not the USA camera.
+-    const bool visibility_left = pc == 0x0801534Eu || pc == 0x0801615Cu;
+-    const bool visibility_right = pc == 0x08015348u || pc == 0x08016156u;
++    // 0801D206 is the render-only visibility method for static OAM
++    // graphics (including doors). Its camera rectangle reads must use the
++    // same horizontal draw margins; entity enable/state/event checks stay native.
++    const bool visibility_left = pc == 0x0801534Eu || pc == 0x0801615Cu ||
++        pc == 0x0801D21Eu;
++    const bool visibility_right = pc == 0x08015348u || pc == 0x08016156u ||
++        pc == 0x0801D218u;
+     if (visibility_left && address == kCameraLeft) {
+         const int extension = std::max(0,
+             static_cast<int>(g_ws_extra_left) - calculate_view_shift(bus));

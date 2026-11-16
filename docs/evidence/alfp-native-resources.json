@@ -1,0 +1,236 @@
+{
+  "rom_sha1": "db36ff52fcd63f753f9d66439aa3d2216701c326",
+  "rom_code": "ALFP",
+  "resources": 1294,
+  "resources_by_layer": {
+    "0": 1028,
+    "1": 88,
+    "2": 88,
+    "3": 90
+  },
+  "unique_descriptors_decoded": 5249,
+  "null_descriptor_references": 653,
+  "native_null_plane": "0x8028fd4",
+  "native_null_plane_all_zero": true,
+  "compression_kinds": {
+    "1": 5249
+  },
+  "tile_index_zero_map_entries": {
+    "0": 3645421
+  },
+  "states": [
+    {
+      "state": "/tmp/legacy2-alfp-reference.Kv0T9J/area-banner.state",
+      "objects": [
+        {
+          "payload": "0x202ff1c",
+          "layer": 3,
+          "resource": "0x82f2970",
+          "dimensions": [
+            2,
+            4
+          ]
+        },
+        {
+          "payload": "0x2031f4c",
+          "layer": 2,
+          "resource": "0x82f1f88",
+          "dimensions": [
+            2,
+            4
+          ]
+        },
+        {
+          "payload": "0x2033f7c",
+          "layer": 1,
+          "resource": "0x82f1968",
+          "dimensions": [
+            1,
+            1
+          ]
+        },
+        {
+          "payload": "0x2035fac",
+          "layer": 0,
+          "resource": "0x82f194c",
+          "dimensions": [
+            1,
+            1
+          ]
+        }
+      ],
+      "native_slots_compared": 8,
+      "null_owned_slots": 0,
+      "native_comparison": "passed",
+      "native_screen": {
+        "comparison": "passed",
+        "native_tilemap_entries_compared": 1200,
+        "layers": [
+          {
+            "layer": 3,
+            "scroll": [
+              88,
+              776
+            ],
+            "screen_base": "0xf800",
+            "character_base": "0x0",
+            "native_tilemap_entries_compared": 600,
+            "outside_authored_resource": 0,
+            "null_descriptor_entries": 0,
+            "tile_zero_bytes": 64,
+            "tile_zero_all_zero": true
+          },
+          {
+            "layer": 2,
+            "scroll": [
+              88,
+              712
+            ],
+            "screen_base": "0xf000",
+            "character_base": "0x0",
+            "native_tilemap_entries_compared": 600,
+            "outside_authored_resource": 0,
+            "null_descriptor_entries": 0,
+            "tile_zero_bytes": 64,
+            "tile_zero_all_zero": true
+          },
+          {
+            "layer": 1,
+            "scroll": [
+              88,
+              648
+            ],
+            "screen_base": "0xe800",
+            "character_base": "0x0",
+            "native_tilemap_entries_compared": 0,
+            "outside_authored_resource": 600,
+            "null_descriptor_entries": 0,
+            "tile_zero_bytes": 64,
+            "tile_zero_all_zero": true
+          },
+          {
+            "layer": 0,
+            "scroll": [
+              88,
+              584
+            ],
+            "screen_base": "0xe000",
+            "character_base": "0x0",
+            "native_tilemap_entries_compared": 0,
+            "outside_authored_resource": 600,
+            "null_descriptor_entries": 0,
+            "tile_zero_bytes": 64,
+            "tile_zero_all_zero": true
+          }
+        ]
+      }
+    },
+    {
+      "state": "/tmp/legacy2-alfp-reference.Kv0T9J/clean-field.state",
+      "objects": [
+        {
+          "payload": "0x202ff1c",
+          "layer": 3,
+          "resource": "0x82f2970",
+          "dimensions": [
+            2,
+            4
+          ]
+        },
+        {
+          "payload": "0x2031f4c",
+          "layer": 2,
+          "resource": "0x82f1f88",
+          "dimensions": [
+            2,
+            4
+          ]
+        },
+        {
+          "payload": "0x2033f7c",
+          "layer": 1,
+          "resource": "0x82f1968",
+          "dimensions": [
+            1,
+            1
+          ]
+        },
+        {
+          "payload": "0x2035fac",
+          "layer": 0,
+          "resource": "0x82f194c",
+          "dimensions": [
+            1,
+            1
+          ]
+        }
+      ],
+      "native_slots_compared": 8,
+      "null_owned_slots": 0,
+      "native_comparison": "passed",
+      "native_screen": {
+        "comparison": "passed",
+        "native_tilemap_entries_compared": 1200,
+        "layers": [
+          {
+            "layer": 3,
+            "scroll": [
+              88,
+              776
+            ],
+            "screen_base": "0xf800",
+            "character_base": "0x0",
+            "native_tilemap_entries_compared": 600,
+            "outside_authored_resource": 0,
+            "null_descriptor_entries": 0,
+            "tile_zero_bytes": 64,
+            "tile_zero_all_zero": true
+          },
+          {
+            "layer": 2,
+            "scroll": [
+              88,
+              712
+            ],
+            "screen_base": "0xf000",
+            "character_base": "0x0",
+            "native_tilemap_entries_compared": 600,
+            "outside_authored_resource": 0,
+            "null_descriptor_entries": 0,
+            "tile_zero_bytes": 64,
+            "tile_zero_all_zero": true
+          },
+          {
+            "layer": 1,
+            "scroll": [
+              88,
+              648
+            ],
+            "screen_base": "0xe800",
+            "character_base": "0x0",
+            "native_tilemap_entries_compared": 0,
+            "outside_authored_resource": 600,
+            "null_descriptor_entries": 0,
+            "tile_zero_bytes": 64,
+            "tile_zero_all_zero": true
+          },
+          {
+            "layer": 0,
+            "scroll": [
+              88,
+              584
+            ],
+            "screen_base": "0xe000",
+            "character_base": "0x0",
+            "native_tilemap_entries_compared": 0,
+            "outside_authored_resource": 600,
+            "null_descriptor_entries": 0,
+            "tile_zero_bytes": 64,
+            "tile_zero_all_zero": true
+          }
+        ]
+      }
+    }
+  ],
+  "limitation": "Native cache, tilemap, and character-zero checks require field gameplay snapshots; a ROM scan alone is not visual QA."
+}

@@ -1,0 +1,40 @@
+plugins { id 'com.android.application' }
+
+def gameRoot = rootProject.projectDir.parentFile
+
+ext.gbaGame = [
+    applicationId: 'org.erpiopio.legacygoku2.thor',
+    versionCode: 2,
+    versionName: '0.1.1-widescreen-dev',
+    title: 'Legacy of Goku II Thor',
+    romLabel: 'Dragon Ball Z: The Legacy of Goku II (Europa ALFP)',
+    romSha1: ['db36ff52fcd63f753f9d66439aa3d2216701c326'],
+    romSize: 8388608,
+    romFile: 'legacy_of_goku_ii_europe_alfp.gba',
+    variant: 'legacy2-europe',
+    gameToml: file('src/main/assets-source/game.toml'),
+    gameRoot: gameRoot,
+    engineRoot: new File(gameRoot, 'gbarecomp'),
+    biosRequired: true,
+    orientation: 'landscape',
+    payloadVersion: 'legacy2-thor-alfp-widescreen-2',
+    setupNote: 'Importa tu ROM europea ALFP y la BIOS de GBA. El idioma se selecciona dentro del juego.',
+    nativeJobs: 1,
+    debugAbis: ['arm64-v8a'],
+    releaseAbis: ['arm64-v8a'],
+    cmakeArguments: [
+        '-DLEGACY2_EUROPE=ON',
+        '-DGBAGAME_RECOMP_UI=OFF',
+        '-DGBARECOMP_RUNTIME_UI_ROOT=',
+        '-DGBARECOMP_SELFHEAL_RECOMPILE_DEFAULT=OFF'
+    ],
+]
+
+apply from: new File(gameRoot, 'gbarecomp/platform/android/gbarecomp-app.gradle')
+
+// Actividades propias para las dos pantallas de AYN Thor.
+android {
+    sourceSets.main.java.srcDir file('src/main/java')
+    sourceSets.main.assets.srcDir file('src/main/assets')
+    sourceSets.main.manifest.srcFile file('src/main/AndroidManifest.xml')
+}

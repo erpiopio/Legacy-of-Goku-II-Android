@@ -1,4 +1,51 @@
-# Dragon Ball Z: The Legacy of Goku II Recomp
+# Dragon Ball Z: The Legacy of Goku II — Android
+
+<!-- LEGACY2-ANDROID-INTRO -->
+
+Android port of **Dragon Ball Z: The Legacy of Goku II**,
+optimized for the **AYN Thor dual-screen handheld**.
+
+## Features
+
+- Native GBA recompilation for Android ARM64.
+- Widescreen 16:9 gameplay.
+- Dual-screen support for AYN Thor.
+- Interactive lower-screen menus.
+- Character status, skills, inventory, journal and Scouter map.
+- Touch controls and original game data integration.
+- Spanish-language European ROM support.
+
+## Installation
+
+1. Download the Android APK from GitHub Releases.
+2. Install it on your compatible Android device.
+3. Import your own European ALFP game ROM and GBA BIOS.
+4. Launch the game and enjoy the dual-screen interface.
+
+The supported European ROM has SHA-1:
+`db36ff52fcd63f753f9d66439aa3d2216701c326`.
+
+**ROM and BIOS are not supplied with the application.**
+
+## Source code
+
+This project builds upon the original recompilation by
+[Matthew Stanley](https://github.com/mstan/DragonBallZLegacyofGokuIIRecomp).
+
+Modified GBARecomp engine:
+[erpiopio/gbarecomp-thor](https://github.com/erpiopio/gbarecomp-thor/tree/legacy-goku2-android).
+
+European source generation:
+[tools/README_EUROPE.md](tools/README_EUROPE.md).
+
+## Original project documentation (Windows / USA)
+
+The following sections describe the original upstream Windows
+implementation and are retained for attribution and reference.
+
+---
+
+### Original recompilation
 
 > **Experimental preview.** This recompilation is a byproduct of developing
 > [gbarecomp](https://github.com/mstan/gbarecomp): the games are the proving
@@ -123,3 +170,40 @@ distributed by this project. Launcher box art is included for identification.
 
 Part of the **R.A.I.D. — Retro AI Development** static-recompilation
 community.
+
+## European ALFP development
+
+For the Thor European branch, see [European source generation](tools/README_EUROPE.md).
+Use `python3 tools/regen_europe.py --check` for read-only verification. The USA
+`regen.ps1` does not target this ROM. Regeneration is explicit and must wait
+until the widescreen adaptation is complete.
+
+<!-- LEGACY2-SCREENSHOTS-START -->
+## Capturas de pantalla — AYN Thor
+
+Port Android de Dragon Ball Z: The Legacy of Goku II, adaptado para la doble pantalla de AYN Thor.
+
+| Vista general | Estado |
+|:---:|:---:|
+| ![Vista general](docs/screenshots/captura.png) | ![Estado](docs/screenshots/estado.png) |
+
+| Diario | Habilidades |
+|:---:|:---:|
+| ![Diario](docs/screenshots/diario.png) | ![Habilidades](docs/screenshots/habilidades.png) |
+
+| Objetos | Mapa |
+|:---:|:---:|
+| ![Objetos](docs/screenshots/objetos.png) | ![Mapa](docs/screenshots/mapa.png) |
+
+**Nota:** La aplicación requiere que el usuario aporte su propia ROM compatible y BIOS de GBA. No se distribuyen con el proyecto.
+<!-- LEGACY2-SCREENSHOTS-END -->
+
+
+## ☕ Support the Project
+
+If you enjoy this Android port and would like to support
+future improvements and the Legacy of Goku trilogy project:
+
+[☕ **Buy Me a Coffee — Support erpiopio**](https://buymeacoffee.com/erpiopio)
+
+Thank you for supporting independent development!

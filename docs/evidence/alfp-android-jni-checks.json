@@ -1,0 +1,130 @@
+{
+  "checked_at_utc": "2026-11-14T19:08:34.917879+00:00",
+  "java_android_compile": {
+    "sources": 19,
+    "sdk": 35,
+    "passed": true,
+    "deprecation_warnings": 87,
+    "output_directory": "/tmp/codex-thor-java-s1p98vqr"
+  },
+  "jni_arm64": {
+    "passed": true,
+    "kind": "syntax only, actual CMake flags plus -Werror",
+    "abi": "arm64-v8a",
+    "ndk": "27.1.12297006",
+    "not_a_link_or_apk_test": true
+  },
+  "jni_host_jvm": {
+    "command": "python3 tools/test_alfp_menu_jni.py --rom roms/legacy_of_goku_ii_europe_alfp.gba --state /tmp/alfp-current-stats-proof.state",
+    "passed": true,
+    "jni_checking": "-Xcheck:jni",
+    "synthetic_concurrent_snapshots": 3000,
+    "copied_real_gbas": {
+      "active_character": "Trunks",
+      "only_available_id": 3,
+      "level": 6,
+      "hp": "149/149",
+      "energy": "39/39",
+      "experience": 1000,
+      "next_experience": 550,
+      "item_fields": 46,
+      "quest_fields": 43
+    },
+    "limitations": [
+      "Copied state and production decoders exercised through real JNI/JVM.",
+      "Does not execute game or JNI on Android.",
+      "No real portrait in copied-state JNI fixture: bus-dependent decoder excluded."
+    ]
+  },
+  "installed_baseline_ui": {
+    "device": "AYN_Thor",
+    "adb_target": "192.168.1.125:45627",
+    "apk_sha256": "af4033862c2b58ef6dce2f1364561274175e604469154304e6bb8593f644b841",
+    "new_source_installed": false,
+    "display_top": "1920x1080 logical0",
+    "display_bottom": "1240x1080 logical4",
+    "steps": [
+      "Wake device; open setup; PLAY.",
+      "Tap lower OBJETOS.",
+      "Tap lower DIARIO (MISIONES).",
+      "Tap lower right arrow (TERMINADO).",
+      "Tap lower ESTADO."
+    ],
+    "observed": [
+      "All four lower UI navigation outcomes visually captured.",
+      "Existing APK inventory remains DATOS PENDIENTES placeholder.",
+      "No controlled character loaded; no real item/quest content visual acceptance."
+    ],
+    "screenshots_directory": "/tmp/codex-thor-android-20261114T185031Z",
+    "player_data_sha256_before_after": "/tmp/codex-thor-android-20261114T185031Z/device-before/player-data-after.json",
+    "rom_bios_save_and_both_suspend_files_unchanged": true,
+    "audio_original_volume_restored": 5,
+    "device_returned_to_sleep": true,
+    "limitations": [
+      "Baseline installed APK only; new UI still requires complete APK build/install gate.",
+      "No gameplay buttons, item consumption, save or load operations used."
+    ]
+  },
+  "build_readiness": {
+    "checked_at_utc": "2026-11-14T19:20:53.545728+00:00",
+    "compilation_started": false,
+    "widescreen_gate_changed": false,
+    "offline_gradle_task_graph": {
+      "command": "Gradle 8.7 --offline --no-daemon --max-workers=1 :app:assembleDebug --dry-run",
+      "passed": true,
+      "seconds": 51,
+      "all_tasks_skipped": true,
+      "warning": "SDK XML reader v3 encountered schema v4; configuration still succeeded"
+    },
+    "cached_dependencies": {
+      "java": "17",
+      "gradle": "8.7",
+      "android_gradle_plugin": "8.6.1",
+      "android_platform": 35,
+      "ndk": "27.1.12297006",
+      "build_tools": [
+        "34.0.0",
+        "35.0.0"
+      ]
+    },
+    "native_compile_database": {
+      "commands": 454,
+      "recompiled_shards": 32,
+      "recompiled_source_bytes": 43691274,
+      "largest_shard_bytes": 1668027,
+      "all_shards_have_O1_g0": true,
+      "jni_bridge_and_portraits_present": true
+    },
+    "historical_android_shard_compilation_seconds": {
+      "count": 32,
+      "total": 169.2,
+      "median": 5.0,
+      "maximum": 9.3
+    },
+    "size_reference_old_apk_bytes": 10221181,
+    "size_reference_old_libmain_bytes": 42192056,
+    "resource_snapshot": {
+      "ram_available_gib": 3.3,
+      "disk_free_gb": 110,
+      "recommended_native_jobs": 1
+    },
+    "estimate": "Several minutes with cached dependencies and one native compile job; historical timings are not a new build measurement.",
+    "apk_checker": {
+      "unit_tests_passed": 5,
+      "old_apk_rejected": true,
+      "rejection_reason": "libmain.so has stale/missing atomic menu JNI export",
+      "checks": [
+        "compatible existing signature/package/version",
+        "all packaged shared libraries ELF64 AARCH64",
+        "defined atomic menu JNI export",
+        "exact Java native signature and six required classes across all DEX files",
+        "dual-screen title activities and backup policy",
+        "four menu assets byte-identical to source",
+        "current Android game.toml payload byte-identical to source",
+        "no ROM/BIOS/save/state/replay files",
+        "no duplicate or corrupt ZIP entries"
+      ],
+      "scope": "Static artifact integrity only; does not authorize APK build or establish gameplay acceptance"
+    }
+  }
+}

@@ -1,0 +1,1196 @@
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+// Authored 16:9 field rendering for the verified European ALFP cartridge.
+
+#include "legacy2_extended_view_europe.h"
+#include "legacy2_projected_view.h"
+#include "legacy2_menu_skill_selection.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <limits>
+#include <unordered_map>
+#include <utility>
+
+#include "gba_bus.h"
+#include "gba_ppu.h"
+#include "runtime_arm.h"
+#include "runtime_bus_bridge.h"
+#include "runtime.h"
+
+extern "C" unsigned g_ws_active;
+extern "C" unsigned g_ws_extra_left;
+extern "C" unsigned g_ws_extra_right;
+
+extern "C" int legacy2_take_item_request();
+extern "C" int legacy2_take_skill_request(int* hero, int* slot);
+extern "C" void legacy2_clear_skill_request();
+
+namespace legacy2 {
+namespace {
+
+// Legacy II keeps four decoded 32x32-tile chunks per field layer. The cache
+// slots rotate as the camera crosses chunk boundaries, so the adjacent bytes
+// in EWRAM are not a stable 64x64 authored plane. Resolve each live layer
+// object, honor its chunk-owner table, and decode uncached ROM descriptors.
+// ALFP constructor 08005318 stores this vtable at payload+0; the allocator's
+// eight-byte header precedes the payload, hence the anchor-relative offsets.
+constexpr std::uint32_t kFieldLayerVtable = 0x08023D18u;
+constexpr std::uint32_t kFieldResourceVtable = 0x080056F9u;
+constexpr std::size_t kFieldChunkBytes = 0x800u;
+constexpr std::uint32_t kCameraLeft = 0x03000F3Cu;
+constexpr std::uint32_t kCameraRight = 0x03000F44u;
+std::uint32_t g_field_objects[4] = {};
+std::unordered_map<
+    std::uint32_t, std::array<std::uint8_t, kFieldChunkBytes>>
+    g_decoded_chunks;
+std::unordered_map<std::uint32_t, std::pair<int, int>>
+    g_content_x_bounds;
+int g_render_view_shift = 0;
+bool g_field_scan_attempted = false;
+gba::GbaBus* g_view_bus = nullptr;
+std::uint64_t g_view_state_epoch = 0;
+std::uint64_t g_view_frame = 0;
+bool g_view_initialized = false;
+
+gba::GbaBus* active_bus() {
+    return gbarecomp::active_bus();
+}
+
+std::uint16_t ewram16(gba::GbaBus* bus, std::uint32_t address) {
+    if (!bus || address < 0x02000000u || address + 1u >= 0x02040000u)
+        return 0;
+    const std::uint8_t* p = bus->ewram_ptr() + address - 0x02000000u;
+    return static_cast<std::uint16_t>(p[0]) |
+        static_cast<std::uint16_t>(p[1] << 8);
+}
+
+std::uint32_t ewram32(gba::GbaBus* bus, std::uint32_t address) {
+    return static_cast<std::uint32_t>(ewram16(bus, address)) |
+        (static_cast<std::uint32_t>(ewram16(bus, address + 2u)) << 16);
+}
+
+std::uint8_t mem8(gba::GbaBus* bus, std::uint32_t address) {
+    if (!bus) return 0;
+    if (address >= 0x02000000u && address < 0x02040000u)
+        return bus->ewram_ptr()[address - 0x02000000u];
+    if (address >= 0x03000000u && address < 0x03008000u)
+        return bus->iwram_ptr()[address - 0x03000000u];
+    if (address >= 0x08000000u &&
+        address - 0x08000000u < bus->rom_size()) {
+        return bus->rom_ptr()[address - 0x08000000u];
+    }
+    return 0;
+}
+
+std::uint16_t mem16(gba::GbaBus* bus, std::uint32_t address) {
+    return static_cast<std::uint16_t>(mem8(bus, address)) |
+        static_cast<std::uint16_t>(mem8(bus, address + 1u) << 8);
+}
+
+std::uint32_t mem32(gba::GbaBus* bus, std::uint32_t address) {
+    return static_cast<std::uint32_t>(mem16(bus, address)) |
+        (static_cast<std::uint32_t>(mem16(bus, address + 2u)) << 16);
+}
+
+class FieldBitReader {
+public:
+    FieldBitReader(gba::GbaBus* bus, std::uint32_t address)
+        : bus_(bus), address_(address) {}
+
+    std::uint32_t bits(unsigned count) {
+        if (count > 31u) {
+            ok_ = false;
+            return 0u;
+        }
+        std::uint32_t value = 0u;
+        while (count--)
+            value = (value << 1) | bit();
+        return value;
+    }
+
+    bool ok() const { return ok_; }
+
+private:
+    std::uint32_t bit() {
+        if (remaining_ == 0u) {
+            if (!bus_ || address_ < 0x08000000u ||
+                address_ - 0x08000000u + 4u > bus_->rom_size()) {
+                ok_ = false;
+                return 0u;
+            }
+            word_ = mem32(bus_, address_);
+            address_ += 4u;
+            remaining_ = 32u;
+        }
+        const std::uint32_t value = word_ >> 31;
+        word_ <<= 1;
+        --remaining_;
+        return value;
+    }
+
+    gba::GbaBus* bus_ = nullptr;
+    std::uint32_t address_ = 0u;
+    std::uint32_t word_ = 0u;
+    unsigned remaining_ = 0u;
+    bool ok_ = true;
+};
+
+bool decode_field_chunk(
+    gba::GbaBus* bus, std::uint32_t descriptor,
+    std::array<std::uint8_t, kFieldChunkBytes>* out) {
+    if (!bus || !out || descriptor < 0x08000000u ||
+        descriptor - 0x08000000u + 8u > bus->rom_size())
+        return false;
+
+    const std::uint32_t kind = mem32(bus, descriptor);
+    const std::uint32_t output_size = mem32(bus, descriptor + 4u);
+    if (output_size != kFieldChunkBytes)
+        return false;
+
+    if (kind == 0u) {
+        if (descriptor - 0x08000000u + 8u + output_size >
+            bus->rom_size())
+            return false;
+        for (std::size_t i = 0; i < out->size(); ++i) {
+            (*out)[i] = mem8(bus, descriptor + 8u +
+                static_cast<std::uint32_t>(i));
+        }
+        return true;
+    }
+    if (kind != 1u && kind != 2u)
+        return false;
+
+    FieldBitReader reader(bus, descriptor + 8u);
+    std::size_t produced = 0u;
+    unsigned distance_bits = 8u;
+    unsigned literal_bits = kind;
+    std::uint32_t literal_base = 0u;
+    std::uint32_t last_distance = 1u;
+
+    auto append = [&](std::uint32_t value) {
+        if (produced >= out->size()) return false;
+        (*out)[produced++] = static_cast<std::uint8_t>(value);
+        return true;
+    };
+    auto copy = [&](std::uint32_t distance, std::uint32_t length) {
+        if (distance == 0u || distance > produced ||
+            length > out->size() - produced)
+            return false;
+        while (length--) {
+            (*out)[produced] = (*out)[produced - distance];
+            ++produced;
+        }
+        return true;
+    };
+    auto gamma = [&]() {
+        std::uint32_t value = 1u;
+        do {
+            value = (value << 1) | reader.bits(1u);
+        } while (reader.bits(1u) != 0u && reader.ok());
+        return value;
+    };
+
+    bool terminated = false;
+    for (unsigned commands = 0; commands < 65536u && !terminated;
+         ++commands) {
+        if (reader.bits(1u) != 0u) {
+            if (literal_bits > 24u ||
+                !append(reader.bits(literal_bits) + literal_base))
+                return false;
+            continue;
+        }
+
+        if (reader.bits(1u) != 0u) {
+            const std::uint32_t code = gamma();
+            std::uint32_t distance = 0u;
+            std::uint32_t length = 0u;
+            if (code == 2u) {
+                distance = last_distance;
+                length = gamma();
+            } else {
+                if (distance_bits > 24u || code < 3u)
+                    return false;
+                distance =
+                    reader.bits(distance_bits) +
+                    ((code - 3u) << distance_bits);
+                last_distance = distance;
+                length = gamma();
+                if (distance >= 0x10000u)
+                    length += 3u;
+                else if (distance >= 0x37FFu)
+                    length += 2u;
+                else if (distance >= 0x027Fu)
+                    length += 1u;
+                else if (distance <= 0x007Fu)
+                    length += 4u;
+            }
+            if (!copy(distance, length))
+                return false;
+            continue;
+        }
+
+        if (reader.bits(1u) == 0u) {
+            const std::uint32_t distance = reader.bits(7u);
+            if (distance != 0u) {
+                last_distance = distance;
+                if (!copy(distance, reader.bits(2u) + 2u))
+                    return false;
+            } else {
+                const unsigned code = reader.bits(2u);
+                if (code == 0u) {
+                    terminated = true;
+                } else {
+                    distance_bits = reader.bits(code + 3u);
+                }
+            }
+            continue;
+        }
+
+        const int short_code =
+            static_cast<int>(reader.bits(4u)) - 1;
+        if (short_code == 0) {
+            if (!append(0u)) return false;
+        } else if (short_code > 0) {
+            if (!copy(static_cast<unsigned>(short_code), 1u))
+                return false;
+        } else if (reader.bits(1u) != 0u) {
+            do {
+                for (unsigned i = 0; i < 256u; ++i) {
+                    if (!append(reader.bits(8u))) return false;
+                }
+            } while (reader.bits(1u) != 0u && reader.ok());
+        } else {
+            literal_base = 0u;
+            literal_bits = 7u + reader.bits(1u);
+            if (literal_bits == 7u)
+                literal_base = reader.bits(8u);
+        }
+        if (!reader.ok())
+            return false;
+    }
+    return reader.ok() && terminated && produced == out->size();
+}
+
+const std::uint8_t* decoded_field_chunk(
+    gba::GbaBus* bus, std::uint32_t descriptor) {
+    const auto found = g_decoded_chunks.find(descriptor);
+    if (found != g_decoded_chunks.end())
+        return found->second.data();
+
+    std::array<std::uint8_t, kFieldChunkBytes> decoded{};
+    if (!decode_field_chunk(bus, descriptor, &decoded))
+        return nullptr;
+    const auto inserted =
+        g_decoded_chunks.emplace(descriptor, std::move(decoded));
+    return inserted.first->second.data();
+}
+
+bool is_overworld(gba::GbaBus* bus) {
+    if (!bus || !g_ws_active) return false;
+    const std::uint16_t dispcnt = bus->io().read16(0x000u);
+    // A field may disable an empty foreground. Requiring all four BGs loses
+    // the whole panoramic view in such rooms. Reject forced blank and other
+    // video layouts, and validate only the layers actually being displayed.
+    if ((dispcnt & 0x00C7u) != 0x0040u || (dispcnt & 0x0F00u) == 0u)
+        return false;
+
+    for (int bg = 0; bg < 4; ++bg) {
+        if ((dispcnt & (0x0100u << bg)) == 0u) continue;
+        const std::uint16_t cnt =
+            bus->io().read16(0x008u + static_cast<std::uint32_t>(bg * 2));
+        if (((cnt >> 8) & 0x1Fu) != static_cast<unsigned>(28 + bg) ||
+            ((cnt >> 14) & 3u) != 0u) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_projected_scene(gba::GbaBus* bus) {
+    if (!bus || !g_ws_active) return false;
+    // Original ALFP setup 08004FCE..08004FF6 selects mode 1 when this
+    // authored field descriptor has a projected map at +0x3C. The same
+    // descriptor is retained at camera+0x50. Do not infer flight from a
+    // display mode alone: title/menu screens can also use affine BGs.
+    if ((bus->io().read16(0x000u) & 0x00C7u) != 0x0041u) return false;
+    const std::uint32_t resource=mem32(bus,0x03000F80u);
+    return resource>=0x08000000u &&
+        resource-0x08000000u+0x40u<=bus->rom_size() &&
+        mem32(bus,resource+0x3Cu)!=0u;
+}
+
+bool field_object_valid(
+    gba::GbaBus* bus, std::uint32_t object, int layer) {
+    if (!bus || object < 0x02000000u || (object & 3u) != 0u ||
+        object > 0x02040000u - 0x2030u)
+        return false;
+
+    // Both the live allocation and its cartridge resource must identify a
+    // field layer; a resource pointer alone can also occur in stale data or
+    // an unrelated object and must not be accepted as a chunk cache.
+    if (ewram32(bus, object + 0x08u) != kFieldLayerVtable)
+        return false;
+    const std::uint32_t resource = ewram32(bus, object + 0x10u);
+    if (resource < 0x08000000u || (resource & 3u))
+        return false;
+
+    const std::uint32_t offset = resource - 0x08000000u;
+    if (offset + 0x18u > bus->rom_size() ||
+        mem32(bus, resource) != kFieldResourceVtable)
+        return false;
+
+    const unsigned resource_layer =
+        (mem32(bus, resource + 0x10u) >> 16) & 0xFFu;
+    const unsigned columns = mem8(bus, resource + 0x14u);
+    const unsigned rows = mem8(bus, resource + 0x15u);
+    const unsigned count = columns * rows;
+
+    // La identidad de BG se determina comparando con VRAM.
+    (void)resource_layer;
+    (void)layer;
+    return count > 0u && count <= 255u &&
+        offset + 0x18u + count * 4u <= bus->rom_size();
+}
+
+// Declaración anticipada para comparar los recursos con VRAM.
+bool field_entry(gba::GbaBus* bus, std::uint32_t object,
+                 int world_x, int world_y, std::uint16_t* out_entry);
+
+void resolve_field_objects(gba::GbaBus* bus) {
+    if (!bus || g_field_scan_attempted) return;
+    g_field_scan_attempted = true;
+
+    const unsigned enabled = (bus->io().read16(0x000u) >> 8) & 15u;
+    const std::uint8_t* vram = bus->vram_ptr();
+
+    for (auto& object : g_field_objects)
+        object = 0u;
+
+    int best_score[4] = {};
+
+    for (std::uint32_t offset = 0;
+         offset + 0x2030u <= 0x40000u; offset += 4u) {
+
+        const std::uint32_t object = 0x02000000u + offset;
+
+        if (!field_object_valid(bus, object, 0))
+            continue;
+
+        for (int bg = 0; bg < 4; ++bg) {
+            if (!(enabled & (1u << bg))) continue;
+
+            const unsigned cnt =
+                bus->io().read16(0x008u + bg * 2u);
+            const unsigned base =
+                ((cnt >> 8) & 31u) * 0x800u;
+
+            const int scroll_x =
+                bus->io().read16(0x010u + bg * 4u);
+            const int scroll_y =
+                bus->io().read16(0x012u + bg * 4u);
+
+            int compared = 0;
+            int exact = 0;
+            int active = 0;
+            int active_exact = 0;
+
+            for (int y = 0; y < 160; y += 8) {
+                for (int x = 0; x < 240; x += 8) {
+                    const int wx = scroll_x + x;
+                    const int wy = scroll_y + y;
+
+                    std::uint16_t entry = 0;
+                    if (!field_entry(bus, object, wx, wy, &entry))
+                        continue;
+
+                    const unsigned tx = (wx & 255) >> 3;
+                    const unsigned ty = (wy & 255) >> 3;
+                    const unsigned off =
+                        base + (ty * 32u + tx) * 2u;
+
+                    if (off + 1u >= 96u * 1024u)
+                        continue;
+
+                    const std::uint16_t native =
+                        std::uint16_t(vram[off]) |
+                        (std::uint16_t(vram[off + 1u]) << 8);
+
+                    ++compared;
+                    if (native == entry) ++exact;
+
+                    if (native != 0u) {
+                        ++active;
+                        if (native == entry)
+                            ++active_exact;
+                    }
+                }
+            }
+
+            // No asignar capas vacías: producirían falsos positivos.
+            // Exigir coincidencia alta con mosaicos visibles reales.
+            if (compared < 30 || active < 2)
+                continue;
+            if (exact * 100 < compared * 95)
+                continue;
+            if (active_exact * 100 < active * 95)
+                continue;
+
+            if (active_exact > best_score[bg]) {
+                best_score[bg] = active_exact;
+                g_field_objects[bg] = object;
+            }
+        }
+    }
+}
+
+
+bool field_entry(
+    gba::GbaBus* bus, std::uint32_t object, int world_x, int world_y,
+    std::uint16_t* out_entry) {
+    if (!bus || !out_entry || world_x < 0 || world_y < 0)
+        return false;
+
+    const std::uint32_t resource = ewram32(bus, object + 0x10u);
+    const unsigned chunk_columns = mem8(bus, resource + 0x14u);
+    const unsigned chunk_rows = mem8(bus, resource + 0x15u);
+    if (chunk_columns == 0u || chunk_rows == 0u ||
+        static_cast<unsigned>(world_x) >= chunk_columns * 256u ||
+        static_cast<unsigned>(world_y) >= chunk_rows * 256u) {
+        return false;
+    }
+
+    const unsigned tile_x = static_cast<unsigned>(world_x) >> 3;
+    const unsigned tile_y = static_cast<unsigned>(world_y) >> 3;
+    const unsigned chunk_x = tile_x >> 5;
+    const unsigned chunk_y = tile_y >> 5;
+    const unsigned chunk_index = chunk_y * chunk_columns + chunk_x;
+    if (chunk_index > 0xFEu)
+        return false;
+
+    std::uint32_t chunk = 0u;
+    for (unsigned slot = 0; slot < 4u; ++slot) {
+        if (mem8(bus, object + 0x24u + slot) == chunk_index) {
+            chunk = object + 0x30u +
+                static_cast<std::uint32_t>(slot) * kFieldChunkBytes;
+            break;
+        }
+    }
+    const unsigned local_x = tile_x & 31u;
+    const unsigned local_y = tile_y & 31u;
+    const std::uint32_t offset =
+        static_cast<std::uint32_t>((local_y * 32u + local_x) * 2u);
+    if (chunk != 0u) {
+        *out_entry = ewram16(bus, chunk + offset);
+        return true;
+    }
+
+    const std::uint32_t descriptor =
+        mem32(bus, resource + 0x18u + chunk_index * 4u);
+
+    // ALFP: un descriptor nulo representa un bloque sin datos.
+    // No intentar descomprimirlo ni reutilizar datos de otro bloque.
+    if (descriptor == 0u) {
+        *out_entry = 0u;
+        return true;
+    }
+
+    const std::uint8_t* decoded =
+        decoded_field_chunk(bus, descriptor);
+    if (!decoded)
+        return false;
+    *out_entry = static_cast<std::uint16_t>(decoded[offset]) |
+        static_cast<std::uint16_t>(decoded[offset + 1u] << 8);
+    return true;
+}
+
+int layer_scroll_x(gba::GbaBus* bus, int bg) {
+    return static_cast<int>(bus->io().read16(
+        0x010u + static_cast<std::uint32_t>(bg * 4)));
+}
+
+bool field_screen_entry(
+    gba::GbaBus* bus, int bg, int hardware_x, int screen_y,
+    std::uint16_t* out_entry) {
+    if (!bus || !out_entry || bg < 0 || bg > 3)
+        return false;
+    const std::uint32_t object = g_field_objects[bg];
+    if (!field_object_valid(bus, object, bg))
+        return false;
+
+    // Unlike the PPU, the Webfoot engine retains the full authored scroll in
+    // the upper bits of BGxHOFS/VOFS. Do not truncate those values to the
+    // hardware's 9-bit ring: the high bits select the resource chunk.
+    const std::uint32_t bg_io =
+        0x010u + static_cast<std::uint32_t>(bg * 4);
+    const int scroll_x =
+        static_cast<int>(bus->io().read16(bg_io));
+    const int scroll_y =
+        static_cast<int>(bus->io().read16(bg_io + 2u));
+    return field_entry(
+        bus, object, scroll_x + hardware_x,
+        scroll_y + screen_y, out_entry);
+}
+
+bool field_content_x_bounds(
+    gba::GbaBus* bus, std::uint32_t object,
+    int* out_min_x, int* out_max_x) {
+    if (!bus || !out_min_x || !out_max_x)
+        return false;
+    const std::uint32_t resource = ewram32(bus, object + 0x10u);
+    const auto cached = g_content_x_bounds.find(resource);
+    if (cached != g_content_x_bounds.end()) {
+        *out_min_x = cached->second.first;
+        *out_max_x = cached->second.second;
+        return *out_min_x < *out_max_x;
+    }
+
+    const unsigned chunk_columns = mem8(bus, resource + 0x14u);
+    const unsigned chunk_rows = mem8(bus, resource + 0x15u);
+    if (chunk_columns == 0u || chunk_rows == 0u)
+        return false;
+
+    int minimum_tile = std::numeric_limits<int>::max();
+    int maximum_tile = -1;
+    for (unsigned chunk_y = 0; chunk_y < chunk_rows; ++chunk_y) {
+        for (unsigned chunk_x = 0; chunk_x < chunk_columns; ++chunk_x) {
+            const unsigned chunk_index =
+                chunk_y * chunk_columns + chunk_x;
+            const std::uint32_t descriptor =
+                mem32(bus, resource + 0x18u + chunk_index * 4u);
+            const std::uint8_t* decoded =
+                decoded_field_chunk(bus, descriptor);
+            if (!decoded)
+                continue;
+            for (unsigned local_y = 0; local_y < 32u; ++local_y) {
+                for (unsigned local_x = 0; local_x < 32u; ++local_x) {
+                    const unsigned offset =
+                        (local_y * 32u + local_x) * 2u;
+                    const std::uint16_t entry =
+                        static_cast<std::uint16_t>(decoded[offset]) |
+                        static_cast<std::uint16_t>(
+                            decoded[offset + 1u] << 8);
+                    if ((entry & 0x03FFu) == 0u)
+                        continue;
+                    const int tile_x = static_cast<int>(
+                        chunk_x * 32u + local_x);
+                    minimum_tile = std::min(minimum_tile, tile_x);
+                    maximum_tile = std::max(maximum_tile, tile_x);
+                }
+            }
+        }
+    }
+    if (maximum_tile < minimum_tile) {
+        // Empty foreground resources are common. Remember the result rather
+        // than decoding/scanning their complete maps again every frame.
+        g_content_x_bounds.emplace(resource, std::pair<int, int>{0, 0});
+        return false;
+    }
+
+    const std::pair<int, int> bounds{
+        minimum_tile * 8, (maximum_tile + 1) * 8};
+    g_content_x_bounds.emplace(resource, bounds);
+    *out_min_x = bounds.first;
+    *out_max_x = bounds.second;
+    return true;
+}
+
+int calculate_view_shift(gba::GbaBus* bus) {
+    if (!bus) return 0;
+    resolve_field_objects(bus);
+    int minimum = std::numeric_limits<int>::max();
+    int maximum = std::numeric_limits<int>::min();
+    bool constrained = false;
+    for (int bg = 0; bg < 4; ++bg) {
+        if ((bus->io().read16(0x000u) & (0x0100u << bg)) == 0u)
+            continue;
+        const std::uint32_t object = g_field_objects[bg];
+        int content_min = 0;
+        int content_max = 0;
+        if (!object || !field_content_x_bounds(
+                bus, object, &content_min, &content_max)) {
+            continue;
+        }
+        const int scroll = layer_scroll_x(bus, bg);
+        // Layers compose one scene. Sparse foregrounds and overlay resources
+        // must not restrict the view to the intersection of their occupied
+        // columns: that pins the whole scene while the native camera moves.
+        minimum = std::min(
+            minimum, static_cast<int>(g_ws_extra_left) +
+                content_min - scroll);
+        maximum = std::max(
+            maximum, content_max - scroll - 240 -
+                static_cast<int>(g_ws_extra_right));
+        constrained = true;
+    }
+    if (!constrained)
+        return 0;
+    if (minimum <= maximum) {
+        if (minimum > 0) return minimum;
+        if (maximum < 0) return maximum;
+        return 0;
+    }
+    return minimum + (maximum - minimum) / 2;
+}
+
+extern "C" int legacy2_bg_x_provider(
+    int bg, int output_x, int screen_y, int* out_hardware_x) {
+    gba::GbaBus* bus = active_bus();
+    if (!out_hardware_x || bg < 0 || bg > 3 || !is_overworld(bus))
+        return 0;
+
+    const int hardware_x =
+        output_x - static_cast<int>(g_ws_extra_left);
+    if (g_render_view_shift == 0)
+        return 0;
+    *out_hardware_x = hardware_x + g_render_view_shift;
+    return 1;
+}
+
+extern "C" int legacy2_tilemap_provider(
+    int bg, int hardware_x, int screen_y, std::uint16_t* out_entry) {
+    gba::GbaBus* bus = active_bus();
+    if (!out_entry || bg < 0 || bg > 3 || !is_overworld(bus))
+        return gba::kWsTilemapUnavailable;
+    // ALFP future Trunks scene: BG0 rain uses the periodic constructor
+    // 08005F48 rather than a finite field-layer resource. Keep its original
+    // scrolling 256px texture ring in the extra columns as on native GBA.
+    const auto level = mem32(bus, 0x03000F80u);
+    const auto layer = mem32(bus, level + 0x14u + static_cast<unsigned>(bg) * 4u);
+    if (layer >= 0x08000000u && layer < 0x08800000u && mem32(bus, layer) == 0x08005F49u)
+        return gba::kWsTilemapKeepWrapped;
+    if (!field_screen_entry(bus, bg, hardware_x, screen_y, out_entry))
+        return gba::kWsTilemapUnavailable;
+    return gba::kWsTilemapReplace;
+}
+
+extern "C" int legacy2_obj_x_provider(
+    int oam_index, std::uint16_t attr0, std::uint16_t attr1,
+    std::uint16_t attr2, int* out_x) {
+    gba::GbaBus* bus = active_bus();
+    const bool field=is_overworld(bus);
+    if (!out_x || (!field && !is_projected_scene(bus))) return 0;
+
+    const int x = attr1 & 0x1FFu;
+    const int y = attr0 & 0xFFu;
+
+    // OAM allocation changes when the area-name banner disappears: health
+    // moves from slots 8..10 to 0..2, and actors follow immediately. Identify
+    // these reserved screen graphics by their ALFP tiles and positions instead
+    // of treating the first eleven slots as overlays. Verified with and without
+    // the Amethyst area banner; USA tile numbers differ in the European ROM.
+    const unsigned tile = attr2 & 0x03FFu;
+    // ALFP: las tres piezas de la barra ocupan OAM 0..2 o 8..10.
+    // Identificarlas juntas evita desplazar solo algunos mosaicos.
+    const bool health_slot =
+        (oam_index >= 0 && oam_index <= 2) ||
+        (oam_index >= 8 && oam_index <= 10);
+    const bool health = health_slot && x < 96 && y < 32;
+    const bool area_name = y >= 112 && y <= 160 &&
+        tile >= 0x308u && tile <= 0x378u;
+    // These tile identities are verified only for non-affine field HUD.
+    // Projected actors are affine and may legitimately reuse the same tiles.
+    if (field && (attr0 & 0x0100u)==0u && (health || area_name)) {
+        *out_x = health
+            ? x - static_cast<int>(g_ws_extra_left)
+            : x;
+        return 1;
+    }
+
+    // Preserve positive authored positions in the new right margin while
+    // retaining the hardware's wrapped representation for off-left objects.
+    // Flight OAM also uses nine-bit X. Values 256..262 are positive in
+    // the new right margin, not the native representation of off-left OBJ.
+    const int view_shift = field ? g_render_view_shift : 0;
+    const int widened_right = 240 +
+        static_cast<int>(g_ws_extra_right) + view_shift;
+    const int world_x = x <= widened_right ? x : x - 512;
+    *out_x = world_x - view_shift;
+    return 1;
+}
+
+
+#if defined(__ANDROID__)
+extern "C" std::uint32_t g_irq_nest_depth;
+
+void legacy2_try_select_skill(gba::GbaBus* bus, int hero, int row,
+        std::uint32_t physical_keys) {
+    const int target = menu::native_technique_for_skill_row(row);
+    if (!bus || hero < 0 || hero >= 5 || target < 0) return;
+    auto* ram = bus->iwram_ptr();
+    const auto sp = g_cpu.R[13];
+    // Run only at the same normal main-loop controller poll used by the
+    // original game. A real L press retains priority over a queued touch.
+    if (ram[0x10AC] != hero || !is_overworld(bus) ||
+        !menu::technique_unlocked(ram, 0x8000, hero, target) ||
+        menu::technique_type(ram, 0x8000, hero, target) < 0 ||
+        g_irq_nest_depth != 0u || (g_cpu.cpsr & 0x1Fu) != 0x1Fu ||
+        bus->io().halted() || g_cpu.R[14] != 0x0801F76Du ||
+        (sp & 3u) != 0u || sp < 0x03003400u || sp > 0x03007F00u ||
+        runtime_call_stack_depth() >= 960u || (physical_keys & 0x200u) == 0u)
+        return;
+    auto* record = ram + 0x10B8u + static_cast<unsigned>(hero) * 0x1Cu;
+    if (record[9] > 3 || mem16(bus, 0x030010B8u + hero * 0x1Cu) == 0)
+        return;
+    const unsigned before = record[9];
+    bool returned = true;
+    for (unsigned cycle = 0; record[9] != target && cycle < 4; ++cycle) {
+        // Execute the actual ALFP L selector. It wraps modulo four and skips
+        // locked techniques; neither Android nor this bridge writes +09.
+        constexpr std::uint32_t kReturn = 0x03007FEDu;
+        const auto saved_cpu = g_cpu;
+        const auto saved_resume = g_runtime_resume_pc;
+        const auto depth = runtime_call_stack_depth();
+        runtime_call_push_return(kReturn);
+        g_cpu.R[0] = 0x030010B8u + static_cast<unsigned>(hero) * 0x1Cu;
+        g_cpu.R[14] = kReturn;
+        runtime_dispatch_with_exchange(menu::kNativeTechniqueCycle);
+        returned = runtime_call_stack_depth() == depth &&
+            g_cpu.R[15] == (kReturn & ~1u) && g_cpu.R[13] == saved_cpu.R[13];
+        if (!returned) runtime_call_should_return(kReturn);
+        g_cpu = saved_cpu;
+        g_runtime_resume_pc = saved_resume;
+        if (!returned) break;
+    }
+    __android_log_print(returned ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+        "LEGACY2_SKILL", "SELECT hero=%d row=%d native=%u->%u confirmed=%u",
+        hero, row, before, unsigned(record[9]),
+        unsigned(returned && record[9] == target));
+}
+
+void legacy2_try_use_item(gba::GbaBus* bus, int item) {
+    if (!bus || item < 0 || item >= 46)
+        return;
+
+    // Callbacks originales verificados en la ROM ALFP.
+    std::uint32_t expected = 0u;
+
+    switch (item) {
+        case 0: expected = 0x080119E5u; break;
+        case 1: expected = 0x08011A39u; break;
+
+        case 2:
+        case 3:
+        case 4:
+            expected = 0x08011773u; break;
+
+        case 5:
+        case 6:
+        case 7:
+            expected = 0x080117D3u; break;
+
+        case 8:
+        case 9:
+        case 10:
+            expected = 0x08011833u; break;
+
+        case 11:
+        case 12:
+        case 13:
+        case 21:
+            expected = 0x08011893u; break;
+
+        case 14:
+        case 15:
+        case 16:
+            expected = 0x08011939u; break;
+
+        case 18:
+            expected = 0x08011A29u; break;
+
+        default:
+            __android_log_print(
+                ANDROID_LOG_INFO, "LEGACY2_ITEM",
+                "NOT_USABLE id=%d", item);
+            return;
+    }
+
+    auto* ram = bus->iwram_ptr();
+    const unsigned hero = ram[0x10ACu];
+    const unsigned qty_offset =
+        0x11D7u + static_cast<unsigned>(item);
+    const unsigned qty = ram[qty_offset];
+
+    const auto sp = g_cpu.R[13];
+    const auto lr = g_cpu.R[14];
+
+    // Mismas protecciones del objeto 21 probado.
+    if (hero >= 6u || qty == 0u ||
+        !is_overworld(bus) ||
+        g_irq_nest_depth != 0u ||
+        (g_cpu.cpsr & 0x1Fu) != 0x1Fu ||
+        bus->io().halted() ||
+        lr != 0x0801F76Du ||
+        (sp & 3u) != 0u ||
+        sp < 0x03003400u ||
+        sp > 0x03007F00u ||
+        runtime_call_stack_depth() >= 960u) {
+
+        __android_log_print(
+            ANDROID_LOG_WARN, "LEGACY2_ITEM",
+            "REJECT id=%d hero=%u qty=%u LR=%08X SP=%08X",
+            item, hero, qty, lr, sp);
+        return;
+    }
+
+    auto* record =
+        ram + 0x10B8u + hero * 0x1Cu;
+
+    const auto read16 = [](const std::uint8_t* p) {
+        return unsigned(p[0]) |
+               (unsigned(p[1]) << 8);
+    };
+
+    const unsigned hp_before = read16(record);
+    const unsigned hp_max = read16(record + 2u);
+
+    if ((record[0x14u] & 1u) == 0u ||
+        hp_before == 0u || hp_max == 0u) {
+        __android_log_print(
+            ANDROID_LOG_INFO, "LEGACY2_ITEM",
+            "REJECT_CHARACTER id=%d HP=%u/%u",
+            item, hp_before, hp_max);
+        return;
+    }
+
+    // Objetos cuyo callback recupera PV.
+    // No gastar curaciones con la vida completa.
+    const bool hp_item =
+        (item >= 11 && item <= 13) || item == 21;
+
+    if (hp_item && hp_before >= hp_max) {
+        __android_log_print(
+            ANDROID_LOG_INFO, "LEGACY2_ITEM",
+            "REJECT_FULL_HP id=%d HP=%u/%u",
+            item, hp_before, hp_max);
+        return;
+    }
+
+    // Comprobar el callback real de cada registro ROM.
+    const std::size_t offset =
+        0x696BC8u +
+        static_cast<unsigned>(item) * 0x38u +
+        0x30u;
+
+    if (!bus->rom_ptr() ||
+        bus->rom_size() < offset + 4u)
+        return;
+
+    const auto* ptr = bus->rom_ptr() + offset;
+
+    const std::uint32_t callback =
+        std::uint32_t(ptr[0]) |
+        (std::uint32_t(ptr[1]) << 8) |
+        (std::uint32_t(ptr[2]) << 16) |
+        (std::uint32_t(ptr[3]) << 24);
+
+    if (callback != expected) {
+        __android_log_print(
+            ANDROID_LOG_ERROR, "LEGACY2_ITEM",
+            "BAD_CALLBACK id=%d actual=%08X expected=%08X",
+            item, callback, expected);
+        return;
+    }
+
+    // Ejecutar en contexto GBA, conservando CPU y retorno.
+    constexpr std::uint32_t kReturn = 0x03007FEDu;
+
+    const auto saved_cpu = g_cpu;
+    const auto saved_resume = g_runtime_resume_pc;
+    const auto depth = runtime_call_stack_depth();
+
+    runtime_call_push_return(kReturn);
+
+    g_cpu.R[0] = static_cast<std::uint32_t>(item);
+    g_cpu.R[14] = kReturn;
+
+    runtime_dispatch_with_exchange(callback);
+
+    const unsigned result = g_cpu.R[0];
+
+    const bool returned =
+        runtime_call_stack_depth() == depth &&
+        g_cpu.R[15] == (kReturn & ~1u) &&
+        g_cpu.R[13] == saved_cpu.R[13];
+
+    if (!returned)
+        runtime_call_should_return(kReturn);
+
+    g_cpu = saved_cpu;
+    g_runtime_resume_pc = saved_resume;
+
+    const unsigned hp_after = read16(record);
+
+    // El menu original descuenta solamente con R0 == 1.
+    // Para la curacion 21 conservamos la comprobacion
+    // adicional ya probada: los PV deben aumentar.
+    const bool effect_ok =
+        !hp_item || hp_after > hp_before;
+
+    if (returned && result == 1u &&
+        effect_ok && ram[qty_offset] == qty) {
+        ram[qty_offset] =
+            static_cast<std::uint8_t>(qty - 1u);
+    }
+
+    __android_log_print(
+        returned ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+        "LEGACY2_ITEM",
+        "USE id=%d callback=%08X returned=%u "
+        "result=%u HP=%u->%u QTY=%u->%u",
+        item, callback, unsigned(returned), result,
+        hp_before, hp_after,
+        qty, unsigned(ram[qty_offset]));
+}
+#endif
+
+extern "C" int legacy2_bus_read_override(
+    std::uint32_t pc, std::uint32_t address, std::uint32_t width,
+    std::uint32_t original, std::uint32_t* out_value) {
+#if defined(__ANDROID__)
+    // Diagnostico: recoger peticiones en el lector original del mando.
+    // No ejecutar funciones GBA ni modificar inventario todavia.
+    if (out_value && pc == 0x0801F3B2u &&
+        address == 0x04000130u && width == 2u) {
+        int skill_hero = -1, skill_row = -1;
+        if (legacy2_take_skill_request(&skill_hero, &skill_row))
+            legacy2_try_select_skill(active_bus(), skill_hero, skill_row, original);
+        const int item = legacy2_take_item_request();
+        if (item >= 0) {
+            gba::GbaBus* guest = active_bus();
+            const unsigned quantity = guest
+                ? mem8(guest, 0x030011D7u + static_cast<unsigned>(item))
+                : 0u;
+            const unsigned hero = guest
+                ? mem8(guest, 0x030010ACu) : 255u;
+            const unsigned video = guest
+                ? guest->io().read16(0x000u) : 0xFFFFu;
+
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "LEGACY2_ITEM",
+                "REQUEST_RECEIVED_ONLY id=%d qty=%u hero=%u "
+                "LR=%08X SP=%08X CPSR=%08X DISPCNT=%04X",
+                item, quantity, hero,
+                g_cpu.R[14], g_cpu.R[13],
+                g_cpu.cpsr, video);
+            legacy2_try_use_item(guest, item);
+        }
+    }
+#endif
+    gba::GbaBus* bus = active_bus();
+    if (!out_value || width != 4u || !bus || !g_ws_active) return 0;
+
+    // Projected/flight visibility is a render predicate, not the field
+    // lifetime/update rectangle. Camera rotation means widening screen X must
+    // extend both world axes. Never modify the shared camera or actor data.
+    const bool projected_x=(pc==0x0801C83Au && address==kCameraLeft) ||
+                           (pc==0x0801C840u && address==kCameraRight);
+    const bool projected_y=(pc==0x0801C848u && address==0x03000F40u) ||
+                           (pc==0x0801C84Eu && address==0x03000F48u);
+    if (projected_x || projected_y) {
+        const auto word=[&](unsigned offset) {
+            const auto* p=bus->iwram_ptr()+offset;
+            return std::int32_t(std::uint32_t(p[0]) | (std::uint32_t(p[1])<<8) |
+                (std::uint32_t(p[2])<<16) | (std::uint32_t(p[3])<<24));
+        };
+        ProjectedWorldMargins margins;
+        if (!projected_world_margins(word(0xF68),word(0xF6C),
+                word(0xF70),word(0xF74),
+                std::max(g_ws_extra_left,g_ws_extra_right),&margins)) return 0;
+        *out_value=extend_projected_bound(original,
+            projected_x ? margins.x : margins.y,
+            pc==0x0801C840u || pc==0x0801C84Eu);
+        return 1;
+    }
+    if (!is_overworld(bus)) return 0;
+
+    // Verified ALFP render-visibility methods 080152E8 and 080160D6.
+    // Widen only these rectangle reads. Other users of the same rectangle
+    // remove/update objects or control lifetimes and must retain native data.
+    // In particular, 0300109C is an ALFP vtable global, not the USA camera.
+    const bool visibility_left = pc == 0x0801534Eu || pc == 0x0801615Cu;
+    const bool visibility_right = pc == 0x08015348u || pc == 0x08016156u;
+    if (visibility_left && address == kCameraLeft) {
+        const int extension = std::max(0,
+            static_cast<int>(g_ws_extra_left) - calculate_view_shift(bus));
+        *out_value = original - static_cast<std::uint32_t>(extension);
+        return 1;
+    }
+    if (visibility_right && address == kCameraRight) {
+        const int extension = std::max(0,
+            static_cast<int>(g_ws_extra_right) + calculate_view_shift(bus));
+        *out_value = original + static_cast<std::uint32_t>(extension);
+        return 1;
+    }
+    return 0;
+}
+
+}  // namespace
+
+extern "C" unsigned legacy2_alfp_cull_right_margin() {
+    gba::GbaBus* bus = active_bus();
+    if (!bus || !g_ws_active) return 0u;
+    return static_cast<unsigned>(std::max(0,
+        static_cast<int>(g_ws_extra_right) +
+        (is_overworld(bus) ? calculate_view_shift(bus) : 0)));
+}
+
+extern "C" unsigned legacy2_alfp_cull_left_margin() {
+    gba::GbaBus* bus = active_bus();
+    if (!bus || !g_ws_active) return 0u;
+    return static_cast<unsigned>(std::max(0,
+        static_cast<int>(g_ws_extra_left) -
+        (is_overworld(bus) ? calculate_view_shift(bus) : 0)));
+}
+
+extern "C" void legacy2_menu_publish_language(int language);
+
+extern "C" void legacy2_menu_publish_probe(
+    const std::uint8_t* iwram);
+
+void update_extended_view(const gbarecomp::ExtendedViewFrameInfo* info) {
+    if (!info) return;
+    gba::GbaBus* bus = active_bus();
+    const bool restored = !g_view_initialized || bus != g_view_bus ||
+        info->state_epoch != g_view_state_epoch ||
+        info->frame_count < g_view_frame;
+#if defined(__ANDROID__)
+    if (restored) legacy2_clear_skill_request();
+#endif
+
+#if defined(__ANDROID__)
+    // Vigila cambios reales del inventario y del personaje GBA.
+    // Solo lectura: nunca modifica la partida.
+    if (bus) {
+        const auto* ram = bus->iwram_ptr();
+        const unsigned hero = ram[0x10ACu];
+
+        static bool initialized = false;
+        static unsigned previous_hero = 255u;
+        static std::array<std::uint8_t, 46> previous_items{};
+        static std::array<std::uint8_t, 28> previous_record{};
+
+        if (hero < 6u) {
+            const auto* record = ram + 0x10B8u + hero * 0x1Cu;
+            const auto* items = ram + 0x11D7u;
+
+            const auto read16 = [](const std::uint8_t* p) {
+                return unsigned(p[0]) | (unsigned(p[1]) << 8);
+            };
+
+            if (!initialized || previous_hero != hero) {
+                __android_log_print(
+                    ANDROID_LOG_INFO, "LEGACY2_EFFECT",
+                    "BASE hero=%u REC00=%u REC02=%u "
+                    "REC04=%u REC06=%u REC0A=%u",
+                    hero, read16(record),
+                    read16(record + 2),
+                    read16(record + 4),
+                    read16(record + 6),
+                    read16(record + 10));
+            } else {
+                for (unsigned id = 0; id < 46u; ++id) {
+                    if (previous_items[id] != items[id]) {
+                        __android_log_print(
+                            ANDROID_LOG_INFO, "LEGACY2_EFFECT",
+                            "INVENTARIO id=%u direccion=%08X "
+                            "cantidad=%u->%u",
+                            id, 0x030011D7u + id,
+                            unsigned(previous_items[id]),
+                            unsigned(items[id]));
+                    }
+                }
+
+                for (unsigned off = 0; off < 28u; off += 2u) {
+                    const unsigned before =
+                        read16(previous_record.data() + off);
+                    const unsigned after = read16(record + off);
+
+                    if (before != after) {
+                        __android_log_print(
+                            ANDROID_LOG_INFO, "LEGACY2_EFFECT",
+                            "PERSONAJE hero=%u direccion=%08X "
+                            "valor=%u->%u",
+                            hero,
+                            0x030010B8u + hero * 0x1Cu + off,
+                            before, after);
+                    }
+                }
+            }
+
+            std::copy(items, items + 46u, previous_items.begin());
+            std::copy(record, record + 28u, previous_record.begin());
+
+            previous_hero = hero;
+            initialized = true;
+        }
+    }
+#endif
+
+    // ALFP: indice del idioma en IWRAM, 0x03001213.
+    // Esta funcion se ejecuta en el contexto del motor.
+    // Android solo recibira una copia atomica.
+    const int raw_language = bus
+        ? static_cast<int>(bus->iwram_ptr()[0x1213u])
+        : -1;
+    legacy2_menu_publish_language(
+        raw_language >= 0 && raw_language <= 4
+            ? raw_language : -1);
+    if (bus)
+        legacy2_menu_publish_probe(bus->iwram_ptr());
+    if (restored) {
+        for (std::uint32_t& object : g_field_objects) object = 0u;
+        g_decoded_chunks.clear();
+        g_content_x_bounds.clear();
+    }
+    if (restored || info->frame_count != g_view_frame)
+        g_field_scan_attempted = false;
+    g_view_bus = bus;
+    g_view_state_epoch = info->state_epoch;
+    g_view_frame = info->frame_count;
+    g_view_initialized = true;
+    // Leave native RAM fast paths available when the enhancement is off.
+    // Resize publishes this callback immediately, before the next frame.
+#if defined(__ANDROID__)
+    // Mantener el interceptor para KEYINPUT incluso sin panoramico.
+    g_runtime_bus_read_override = &legacy2_bus_read_override;
+#else
+    g_runtime_bus_read_override =
+        g_ws_active ? &legacy2_bus_read_override : nullptr;
+#endif
+
+    // The same shift applies to every BG and world sprite for the entire
+    // frame. It must be ready before sampling begins, including when a BG is
+    // hidden, a window masks output column zero, or a saved state is loaded.
+    // Mantener la deteccion de capas aunque no desplacemos la camara.
+    if (is_overworld(bus))
+        resolve_field_objects(bus);
+    g_render_view_shift = 0;  // Escenario estable, sin desplazamiento automatico.
+}
+
+void install_extended_view(std::uint32_t, std::uint32_t) {
+    for (std::uint32_t& object : g_field_objects)
+        object = 0u;
+    g_decoded_chunks.clear();
+    g_content_x_bounds.clear();
+    g_render_view_shift = 0;
+    g_field_scan_attempted = false;
+    g_view_bus = nullptr;
+    g_view_initialized = false;
+    gba::g_ws_tilemap_provider = &legacy2_tilemap_provider;
+    gba::g_ws_authored_margin_layers = 1;
+    gba::g_ws_bg_x_provider = &legacy2_bg_x_provider;
+    gba::g_ws_bg_x_provider_layers =
+        (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3);
+    gba::g_ws_obj_attr_x_provider = &legacy2_obj_x_provider;
+    g_runtime_bus_read_override = &legacy2_bus_read_override;
+    std::fprintf(stderr,
+        "[legacy2:ALFP] authored BG0..BG3, frame camera, edge HUD and "
+        "European render-visibility hooks enabled\n");
+}
+
+}  // namespace legacy2
